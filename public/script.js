@@ -1,6 +1,6 @@
 // ====== CONFIGURATION ======
 const CONFIG = {
-  SOCKET_URL: "http://localhost:3000",
+  SOCKET_URL: "https://language-translator-chat-app-api.onrender.com",
   SUPPORTED_LANGUAGES: {
     en: { name: "English", flag: "🇺🇸" },
     hi: { name: "Hindi", flag: "🇮🇳" },
@@ -13,6 +13,7 @@ const CONFIG = {
     ar: { name: "Arabic", flag: "🇸🇦" }
   }
 };
+
 
 // ====== STATE MANAGEMENT ======
 let appState = {
