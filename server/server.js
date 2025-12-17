@@ -15,7 +15,7 @@ app.use(
       "http://127.0.0.1",
       "http://localhost:5500",
       "http://127.0.0.1:5500",
-      "https://language-translator-chat-app-ui.onrender.com" // frontend URL
+      "https://language-translator-chat-app-ui.onrender.com"
     ],
     methods: ["GET", "POST"],
     credentials: true
@@ -37,7 +37,7 @@ const io = new Server(server, {
 });
 
 /* =======================
-   ROUTES (FOR BROWSER)
+   ROUTES
    ======================= */
 app.get("/", (req, res) => {
   res.send("🚀 LinguaBridge Translation API is running successfully");
@@ -50,6 +50,39 @@ app.get("/health", (req, res) => {
     uptime: process.uptime()
   });
 });
+
+/* =======================
+   LIBRETRANSLATE CONFIG
+   ======================= */
+const TRANSLATE_APIS = [
+  "https://libretranslate.de/translate",
+  "https://translate.astian.org/translate"
+];
+
+async function translateText(message, sourceLang, targetLang) {
+  for (const api of TRANSLATE_APIS) {
+    try {
+      const response = await fetch(api, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          q: message,
+          source: sourceLang,
+          target: targetLang,
+          format: "text"
+        })
+      });
+
+      const data = await response.json();
+      if (data?.translatedText) {
+        return data.translatedText;
+      }
+    } catch (err) {
+      console.warn("⚠️ Translation API failed:", api);
+    }
+  }
+  throw new Error("All translation services unavailable");
+}
 
 /* =======================
    SOCKET CONNECTION
@@ -69,7 +102,6 @@ io.on("connection", (socket) => {
     });
 
     try {
-      // Validation
       if (!message || !sourceLang || !targetLang) {
         throw new Error("Missing required fields");
       }
@@ -78,49 +110,20 @@ io.on("connection", (socket) => {
         throw new Error("Source and target languages cannot be the same");
       }
 
-      // MyMemory API
-      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(
-        message
-      )}&langpair=${sourceLang}|${targetLang}`;
+      // Ensure short language codes
+      const langMap = {
+        "en-US": "en",
+        "hi-IN": "hi"
+      };
 
-      console.log("🌐 Calling translation API:", url);
+      sourceLang = langMap[sourceLang] || sourceLang;
+      targetLang = langMap[targetLang] || targetLang;
 
-      const response = await fetch(url);
-      const data = await response.json();
-
-      console.log("✅ API response received");
-
-      let translatedText = null;
-
-      // Smart match selection
-      if (Array.isArray(data.matches)) {
-        const goodMatch = data.matches.find(
-          (m) =>
-            typeof m.translation === "string" &&
-            m.translation.trim().length > 0 &&
-            m.translation.toLowerCase() !== "never" &&
-            m.translation.toLowerCase() !== "no translation found"
-        );
-
-        if (goodMatch) {
-          translatedText = goodMatch.translation;
-          console.log("📝 Using match:", translatedText);
-        }
-      }
-
-      // Fallback
-      if (!translatedText && data?.responseData?.translatedText) {
-        translatedText = data.responseData.translatedText;
-        console.log("📝 Using responseData:", translatedText);
-      }
-
-      if (!translatedText) {
-        throw new Error("Translation not found in API response");
-      }
-
-      translatedText = translatedText
-        .trim()
-        .replace(/\[\w+\]\s*/g, "");
+      const translatedText = await translateText(
+        message.trim(),
+        sourceLang,
+        targetLang
+      );
 
       socket.emit("receiveMessage", {
         original: message,
@@ -129,7 +132,7 @@ io.on("connection", (socket) => {
         targetLang
       });
 
-      console.log("✅ Translation sent successfully");
+      console.log("✅ Translation sent:", translatedText);
     } catch (error) {
       console.error("❌ Translation error:", error.message);
 
@@ -140,7 +143,7 @@ io.on("connection", (socket) => {
 
       socket.emit("receiveMessage", {
         original: message,
-        translated: `[${targetLang.toUpperCase()} Translation] ${message}`,
+        translated: "⚠️ Translation unavailable. Please try again.",
         sourceLang,
         targetLang
       });
