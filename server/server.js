@@ -4,14 +4,29 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 
 const app = express();
-app.use(cors({
-  origin: ["http://localhost", "http://127.0.0.1", "http://localhost:5500", "http://127.0.0.1:5500"],
-  methods: ["GET", "POST"],
-  credentials: true
-}));
+
+/* =======================
+   CORS CONFIGURATION
+   ======================= */
+app.use(
+  cors({
+    origin: [
+      "http://localhost",
+      "http://127.0.0.1",
+      "http://localhost:5500",
+      "http://127.0.0.1:5500",
+      "https://language-translator-chat-app-ui.onrender.com" // frontend URL
+    ],
+    methods: ["GET", "POST"],
+    credentials: true
+  })
+);
 
 const server = http.createServer(app);
 
+/* =======================
+   SOCKET.IO CONFIG
+   ======================= */
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -21,22 +36,40 @@ const io = new Server(server, {
   pingInterval: 25000
 });
 
-// Test route
+/* =======================
+   ROUTES (FOR BROWSER)
+   ======================= */
 app.get("/", (req, res) => {
-  res.send("🚀 LinguaBridge Translation Server is running!");
+  res.send("🚀 LinguaBridge Translation API is running successfully");
 });
 
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    service: "LinguaBridge Translation API",
+    uptime: process.uptime()
+  });
+});
+
+/* =======================
+   SOCKET CONNECTION
+   ======================= */
 io.on("connection", (socket) => {
   console.log("🟢 User connected:", socket.id);
-  
-  // Send welcome message
-  socket.emit("connected", { message: "Connected to translation server" });
+
+  socket.emit("connected", {
+    message: "Connected to LinguaBridge translation server"
+  });
 
   socket.on("sendMessage", async ({ message, sourceLang, targetLang }) => {
-    console.log("📨 Received translation request:", { message, sourceLang, targetLang });
-    
+    console.log("📨 Received translation request:", {
+      message,
+      sourceLang,
+      targetLang
+    });
+
     try {
-      // Validate input
+      // Validation
       if (!message || !sourceLang || !targetLang) {
         throw new Error("Missing required fields");
       }
@@ -45,7 +78,7 @@ io.on("connection", (socket) => {
         throw new Error("Source and target languages cannot be the same");
       }
 
-      // 🔹 MyMemory FREE Translation API (GET only)
+      // MyMemory API
       const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(
         message
       )}&langpair=${sourceLang}|${targetLang}`;
@@ -55,11 +88,11 @@ io.on("connection", (socket) => {
       const response = await fetch(url);
       const data = await response.json();
 
-      console.log("✅ API Response received");
+      console.log("✅ API response received");
 
       let translatedText = null;
 
-      // ✅ 1. Smart selection from matches
+      // Smart match selection
       if (Array.isArray(data.matches)) {
         const goodMatch = data.matches.find(
           (m) =>
@@ -71,52 +104,45 @@ io.on("connection", (socket) => {
 
         if (goodMatch) {
           translatedText = goodMatch.translation;
-          console.log("📝 Found match from matches array:", translatedText);
+          console.log("📝 Using match:", translatedText);
         }
       }
 
-      // ✅ 2. Fallback to responseData
+      // Fallback
       if (!translatedText && data?.responseData?.translatedText) {
         translatedText = data.responseData.translatedText;
         console.log("📝 Using responseData:", translatedText);
       }
 
       if (!translatedText) {
-        console.warn("⚠️ No translation found in API response:", data);
         throw new Error("Translation not found in API response");
       }
 
-      // Clean up translation
-      translatedText = translatedText.trim();
-      
-      // Remove [en] or other language tags if present
-      translatedText = translatedText.replace(/\[\w+\]\s*/g, '');
+      translatedText = translatedText
+        .trim()
+        .replace(/\[\w+\]\s*/g, "");
 
-      console.log("✅ Sending translation:", { original: message, translated: translatedText });
-
-      // Send back to the client who requested it
       socket.emit("receiveMessage", {
         original: message,
         translated: translatedText,
-        sourceLang: sourceLang,
-        targetLang: targetLang
+        sourceLang,
+        targetLang
       });
 
+      console.log("✅ Translation sent successfully");
     } catch (error) {
       console.error("❌ Translation error:", error.message);
-      
-      // Send error back to client
+
       socket.emit("translation_error", {
         error: error.message,
-        message: message
+        message
       });
-      
-      // Also send a fallback message
+
       socket.emit("receiveMessage", {
         original: message,
         translated: `[${targetLang.toUpperCase()} Translation] ${message}`,
-        sourceLang: sourceLang,
-        targetLang: targetLang
+        sourceLang,
+        targetLang
       });
     }
   });
@@ -126,8 +152,13 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3000, () => {
-  console.log("🚀 Server running at http://localhost:3000");
+/* =======================
+   SERVER START (RENDER SAFE)
+   ======================= */
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
   console.log("🌐 WebSocket server ready");
-  console.log("📡 CORS enabled for all origins");
+  console.log("📡 CORS enabled");
 });
