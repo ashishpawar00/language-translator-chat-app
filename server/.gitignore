@@ -1,0 +1,9 @@
+# Ignore node dependencies
+node_modules/
+server/node_modules/
+
+# Ignore environment files
+.env
+
+# OS files
+.DS_Store
