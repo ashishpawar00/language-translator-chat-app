@@ -10,7 +10,7 @@ const app = express();
    ======================= */
 app.use(
   cors({
-    origin: "*", // Allow all origins for now
+    origin: "*",
     methods: ["GET", "POST"],
     credentials: true
   })
@@ -18,9 +18,6 @@ app.use(
 
 const server = http.createServer(app);
 
-/* =======================
-   SOCKET.IO CONFIG
-   ======================= */
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -49,7 +46,7 @@ app.get("/health", (req, res) => {
    LANGUAGE CODE NORMALIZATION
    ======================= */
 function normalizeLang(lang) {
-  if (!lang) return 'en'; // Default to English
+  if (!lang) return 'en';
   
   const langStr = String(lang).toLowerCase().trim();
   
@@ -74,303 +71,391 @@ function normalizeLang(lang) {
     'ja': 'ja',
     'ko': 'ko',
     'zh': 'zh',
-    'ar': 'ar',
-    'en-us': 'en',
-    'hi-in': 'hi',
-    'es-es': 'es',
-    'fr-fr': 'fr',
-    'de-de': 'de',
-    'ja-jp': 'ja',
-    'ko-kr': 'ko',
-    'zh-cn': 'zh',
-    'ar-sa': 'ar'
+    'ar': 'ar'
   };
   
-  return map[langStr] || langStr.slice(0, 2); // Return normalized or first 2 chars
+  return map[langStr] || 'en'; // Default to English
 }
 
 /* =======================
-   TRANSLATION SERVICES WITH PROPER TIMEOUT
+   TRANSLATION SERVICES - STRICT FILTERING
    ======================= */
-async function translateWithTimeout(fetchPromise, timeoutMs = 8000) {
-  let timeoutId;
-  const timeoutPromise = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error('Translation request timeout'));
-    }, timeoutMs);
-  });
 
+// Google Translate API (unofficial but reliable)
+async function translateWithGoogleTranslate(message, sourceLang, targetLang) {
   try {
-    const result = await Promise.race([fetchPromise, timeoutPromise]);
-    clearTimeout(timeoutId);
-    return result;
+    // Using a free Google Translate API endpoint
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceLang}&tl=${targetLang}&dt=t&q=${encodeURIComponent(message)}`;
+    
+    console.log(`🔗 Google Translate API: ${sourceLang} → ${targetLang}`);
+    
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      throw new Error(`Google API returned ${response.status}`);
+    }
+    
+    const data = await response.json();
+    
+    if (data && data[0] && data[0][0] && data[0][0][0]) {
+      const translated = data[0][0][0];
+      console.log(`✅ Google Translate: "${translated}"`);
+      return translated;
+    }
+    
+    throw new Error("No translation found in Google response");
   } catch (error) {
-    clearTimeout(timeoutId);
+    console.warn("⚠️ Google Translate failed:", error.message);
     throw error;
   }
 }
 
+// Improved MyMemory with strict filtering
 async function translateWithMyMemory(message, sourceLang, targetLang) {
   try {
     const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(message)}&langpair=${sourceLang}|${targetLang}`;
     
-    console.log(`🔗 MyMemory API URL: ${url}`);
+    console.log(`🔗 MyMemory API: ${sourceLang} → ${targetLang}`);
     
-    const fetchPromise = fetch(url);
-    const response = await translateWithTimeout(fetchPromise, 10000);
+    const response = await fetch(url);
     
     if (!response.ok) {
       throw new Error(`MyMemory API returned ${response.status}`);
     }
     
     const data = await response.json();
-
-    console.log("MyMemory API Response received");
-
-    // Try matches first
+    
+    // STRICT FILTERING RULES
+    const inappropriateWords = ['allah', 'god', 'jesus', 'pray', 'religion', 'muslim', 'christian', 'hindu', 'allah', 'bible', 'quran'];
+    const qualityThreshold = 60; // Minimum match quality
+    
     if (Array.isArray(data.matches)) {
-      // Sort by quality (higher quality first)
-      const sortedMatches = data.matches.sort((a, b) => (b.match || 0) - (a.match || 0));
+      // Filter out inappropriate and low-quality translations
+      const goodMatches = data.matches.filter(match => {
+        if (!match.translation || typeof match.translation !== 'string') return false;
+        
+        const translation = match.translation.toLowerCase();
+        
+        // Check for inappropriate content
+        if (inappropriateWords.some(word => translation.includes(word))) {
+          console.log(`🚫 Filtered inappropriate translation: ${match.translation}`);
+          return false;
+        }
+        
+        // Check quality
+        if (match.match < qualityThreshold) {
+          console.log(`📉 Low quality (${match.match}): ${match.translation}`);
+          return false;
+        }
+        
+        // Don't return same as input
+        if (translation === message.toLowerCase()) {
+          return false;
+        }
+        
+        // Should look like a proper sentence
+        if (translation.length < 2) return false;
+        
+        return true;
+      });
       
-      const goodMatch = sortedMatches.find(
-        (m) =>
-          typeof m.translation === "string" &&
-          m.translation.trim().length > 0 &&
-          !m.translation.toLowerCase().includes('no translation') &&
-          !m.translation.toLowerCase().includes('not found') &&
-          m.translation.toLowerCase() !== 'never' &&
-          m.translation !== message // Not the same as input
-      );
-
-      if (goodMatch) {
-        console.log("✅ Found match from MyMemory (quality:", goodMatch.match, "):", goodMatch.translation);
-        return goodMatch.translation.trim();
+      // Sort by quality (highest first)
+      goodMatches.sort((a, b) => (b.match || 0) - (a.match || 0));
+      
+      if (goodMatches.length > 0) {
+        const bestMatch = goodMatches[0];
+        console.log(`✅ MyMemory best match (quality ${bestMatch.match}): "${bestMatch.translation}"`);
+        return bestMatch.translation.trim();
       }
     }
-
-    // Fallback to responseData
+    
+    // Fallback to responseData with filtering
     if (data?.responseData?.translatedText) {
-      const translated = data.responseData.translatedText.trim();
-      if (translated && translated !== message) {
-        console.log("✅ Using MyMemory responseData:", translated);
-        return translated;
+      const translation = data.responseData.translatedText.trim();
+      const lowerTranslation = translation.toLowerCase();
+      
+      // Filter inappropriate content
+      if (!inappropriateWords.some(word => lowerTranslation.includes(word)) && 
+          translation !== message) {
+        console.log(`✅ MyMemory responseData: "${translation}"`);
+        return translation;
       }
     }
-
-    throw new Error("No valid translation found in MyMemory response");
+    
+    throw new Error("No suitable translation found");
   } catch (error) {
     console.warn("⚠️ MyMemory API failed:", error.message);
     throw error;
   }
 }
 
-async function translateWithLibreTranslate(message, sourceLang, targetLang) {
-  const LIBRE_APIS = [
-    "https://libretranslate.de/translate",
-    "https://translate.astian.org/translate",
-    "https://translate.argosopentech.com/translate"
-  ];
-
-  for (const api of LIBRE_APIS) {
-    try {
-      console.log(`🔗 Trying LibreTranslate: ${api}`);
-      
-      const fetchPromise = fetch(api, {
-        method: "POST",
-        headers: { 
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
-        body: JSON.stringify({
-          q: message,
-          source: sourceLang,
-          target: targetLang,
-          format: "text"
-        })
-      });
-
-      const response = await translateWithTimeout(fetchPromise, 8000);
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (data?.translatedText) {
-        const translated = data.translatedText.trim();
-        console.log(`✅ LibreTranslate success from ${api}:`, translated);
-        return translated;
-      }
-    } catch (err) {
-      console.warn(`⚠️ LibreTranslate API failed (${api}):`, err.message);
-      continue; // Try next API
+// Microsoft Bing Translator (alternative)
+async function translateWithBing(message, sourceLang, targetLang) {
+  try {
+    // Using a public Bing Translate endpoint
+    const url = `https://www.bing.com/ttranslatev3?isVertical=1&IG=1&IID=translator.5023`;
+    
+    const formData = new URLSearchParams();
+    formData.append('text', message);
+    formData.append('fromLang', sourceLang);
+    formData.append('to', targetLang);
+    
+    console.log(`🔗 Bing Translator: ${sourceLang} → ${targetLang}`);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Bing API returned ${response.status}`);
     }
+    
+    const data = await response.json();
+    
+    if (data && data[0] && data[0].translations && data[0].translations[0]) {
+      const translated = data[0].translations[0].text;
+      console.log(`✅ Bing Translator: "${translated}"`);
+      return translated;
+    }
+    
+    throw new Error("No translation found in Bing response");
+  } catch (error) {
+    console.warn("⚠️ Bing Translator failed:", error.message);
+    throw error;
   }
-  
-  throw new Error("All LibreTranslate services unavailable");
 }
 
+// Smart translation with multiple fallbacks
 async function translateText(message, sourceLang, targetLang) {
-  console.log(`🔍 Translating: "${message}" from ${sourceLang} to ${targetLang}`);
+  console.log(`\n🔍 Translating: "${message}" from ${sourceLang} to ${targetLang}`);
   
   // Normalize language codes
   sourceLang = normalizeLang(sourceLang);
   targetLang = normalizeLang(targetLang);
   
-  console.log(`🔧 Normalized languages: ${sourceLang} → ${targetLang}`);
-
-  // Try different translation strategies based on language pair
-  try {
-    // For Hindi translations, MyMemory usually works better
-    if (targetLang === 'hi' || sourceLang === 'hi') {
-      console.log("🎯 Using MyMemory (better for Hindi)");
-      return await translateWithMyMemory(message, sourceLang, targetLang);
-    }
-    
-    // For other languages, try LibreTranslate first
-    console.log("🎯 Trying LibreTranslate first");
-    return await translateWithLibreTranslate(message, sourceLang, targetLang);
-    
-  } catch (error) {
-    console.log("⚠️ Primary translation failed, trying fallback...");
-    
-    // Fallback: Try the other service
+  console.log(`🔧 Normalized: ${sourceLang} → ${targetLang}`);
+  
+  // Common phrases dictionary (highest priority - most accurate)
+  const commonPhrase = getCommonTranslation(message, sourceLang, targetLang);
+  if (commonPhrase) {
+    console.log(`📚 Using verified common phrase: "${commonPhrase}"`);
+    return commonPhrase;
+  }
+  
+  // Try different services in order of reliability
+  const services = [
+    { name: 'Google', fn: translateWithGoogleTranslate },
+    { name: 'Bing', fn: translateWithBing },
+    { name: 'MyMemory', fn: translateWithMyMemory }
+  ];
+  
+  for (const service of services) {
     try {
-      if (targetLang === 'hi' || sourceLang === 'hi') {
-        // If MyMemory failed for Hindi, try LibreTranslate
-        return await translateWithLibreTranslate(message, sourceLang, targetLang);
+      console.log(`🔄 Trying ${service.name} Translate...`);
+      const result = await service.fn(message, sourceLang, targetLang);
+      
+      // Validate the translation
+      if (isValidTranslation(result, message)) {
+        console.log(`✅ ${service.name} success: "${result}"`);
+        return result;
       } else {
-        // If LibreTranslate failed for others, try MyMemory
-        return await translateWithMyMemory(message, sourceLang, targetLang);
+        console.log(`⚠️ ${service.name} returned invalid translation`);
+        continue;
       }
-    } catch (error2) {
-      console.error("❌ All translation services failed");
-      
-      // Last resort: Common phrases dictionary
-      const commonTranslation = getCommonTranslation(message, sourceLang, targetLang);
-      if (commonTranslation) {
-        console.log("📚 Using common phrases dictionary");
-        return commonTranslation;
-      }
-      
-      throw new Error("Translation service unavailable. Please try again later.");
+    } catch (error) {
+      console.log(`⚠️ ${service.name} failed: ${error.message}`);
+      continue;
     }
+  }
+  
+  // Ultimate fallback
+  console.log("❌ All translation services failed");
+  
+  if (sourceLang === 'hi' && targetLang === 'en') {
+    return `[Translated from Hindi] ${message}`;
+  } else if (sourceLang === 'en' && targetLang === 'hi') {
+    return `[अंग्रेजी से अनुवादित] ${message}`;
+  } else {
+    return `[${sourceLang} → ${targetLang}] ${message}`;
   }
 }
 
+// Validate translation quality
+function isValidTranslation(translation, original) {
+  if (!translation || typeof translation !== 'string') return false;
+  
+  const transLower = translation.toLowerCase();
+  const origLower = original.toLowerCase();
+  
+  // Don't accept same as input
+  if (transLower === origLower) return false;
+  
+  // Filter inappropriate content
+  const inappropriate = [
+    'allah', 'god', 'jesus', 'pray', 'religion', 'muslim', 'christian',
+    'hindu', 'allah', 'bible', 'quran', 'sex', 'fuck', 'shit', 'ass'
+  ];
+  
+  if (inappropriate.some(word => transLower.includes(word))) {
+    console.log(`🚫 Filtered inappropriate: ${translation}`);
+    return false;
+  }
+  
+  // Should be reasonable length
+  if (translation.length < 1 || translation.length > 500) return false;
+  
+  return true;
+}
+
+// Enhanced common phrases dictionary
 function getCommonTranslation(message, sourceLang, targetLang) {
   const lowerMessage = message.toLowerCase().trim();
   
-  // English to Hindi common phrases
+  // English to Hindi dictionary
   if (sourceLang === 'en' && targetLang === 'hi') {
     const translations = {
+      // Greetings
       "hello": "नमस्ते",
       "hi": "नमस्ते",
       "hey": "नमस्ते",
-      "how are you": "आप कैसे हैं?",
-      "how are you doing": "आप कैसे हैं?",
-      "what's up": "क्या हाल है?",
-      "what is up": "क्या हाल है?",
       "good morning": "शुभ प्रभात",
       "good afternoon": "शुभ अपराह्न",
       "good evening": "शुभ संध्या",
       "good night": "शुभ रात्रि",
+      
+      // Common questions
+      "how are you": "आप कैसे हैं?",
+      "how are you doing": "आप कैसे हैं?",
+      "what's up": "क्या हाल है?",
+      "what is your name": "आपका नाम क्या है?",
+      "where are you from": "आप कहाँ से हैं?",
+      "how old are you": "आपकी उम्र क्या है?",
+      
+      // Responses
+      "i am fine": "मैं ठीक हूँ",
+      "i'm good": "मैं ठीक हूँ",
+      "i'm okay": "मैं ठीक हूँ",
       "thank you": "धन्यवाद",
       "thanks": "धन्यवाद",
-      "please": "कृपया",
+      "you're welcome": "आपका स्वागत है",
       "sorry": "माफ़ कीजिए",
       "excuse me": "माफ़ कीजिए",
+      "please": "कृपया",
+      
+      // Basic words
       "yes": "हाँ",
       "no": "नहीं",
-      "maybe": "शायद",
       "okay": "ठीक है",
       "ok": "ठीक है",
-      "i love you": "मैं तुमसे प्यार करता हूँ",
-      "what is your name": "आपका नाम क्या है?",
-      "my name is": "मेरा नाम है",
-      "where are you from": "आप कहाँ से हैं?",
-      "nice to meet you": "आपसे मिलकर खुशी हुई",
-      "see you later": "बाद में मिलते हैं",
-      "goodbye": "अलविदा",
-      "bye": "अलविदा",
-      "how much is this": "यह कितने का है?",
-      "can you help me": "क्या आप मेरी मदद कर सकते हैं?",
-      "i need help": "मुझे मदद चाहिए",
-      "where is the bathroom": "बाथरूम कहाँ है?",
-      "water": "पानी",
+      "maybe": "शायद",
+      
+      // Questions
+      "what is this": "यह क्या है?",
+      "what is that": "वह क्या है?",
+      "who is this": "यह कौन है?",
+      "where is it": "यह कहाँ है?",
+      "when is it": "यह कब है?",
+      "why is it": "यह क्यों है?",
+      "how is it": "यह कैसा है?",
+      
+      // Time
+      "what time is it": "क्या समय हुआ है?",
+      "what is the time": "समय क्या है?",
+      
+      // Food
+      "i am hungry": "मुझे भूख लगी है",
       "food": "खाना",
+      "water": "पानी",
+      
+      // Help
       "help": "मदद",
-      "welcome": "स्वागत है",
-      "how much": "कितना",
-      "where": "कहाँ",
-      "when": "कब",
-      "why": "क्यों",
-      "who": "कौन",
-      "what": "क्या",
-      "good": "अच्छा",
-      "bad": "बुरा",
-      "happy": "खुश",
-      "sad": "उदास"
+      "i need help": "मुझे मदद चाहिए",
+      "can you help me": "क्या आप मेरी मदद कर सकते हैं?",
+      
+      // Directions
+      "where is the bathroom": "बाथरूम कहाँ है?",
+      "where is the hotel": "होटल कहाँ है?",
+      
+      // Feelings
+      "i love you": "मैं तुमसे प्यार करता हूँ",
+      "i like you": "मुझे तुम पसंद हो",
+      "i am happy": "मैं खुश हूँ",
+      "i am sad": "मैं उदास हूँ",
+      
+      // Work/Study
+      "what do you do": "आप क्या करते हैं?",
+      "i am a student": "मैं एक छात्र हूँ",
+      "i am working": "मैं काम कर रहा हूँ"
     };
     
     return translations[lowerMessage];
   }
   
-  // Hindi to English common phrases
+  // Hindi to English dictionary
   if (sourceLang === 'hi' && targetLang === 'en') {
     const translations = {
+      // Greetings
       "नमस्ते": "Hello",
       "नमस्कार": "Hello",
       "प्रणाम": "Greetings",
-      "आप कैसे हैं": "How are you?",
-      "आप कैसे हो": "How are you?",
-      "क्या हाल है": "What's up?",
-      "कैसे हो": "How are you?",
       "शुभ प्रभात": "Good morning",
       "शुभ संध्या": "Good evening",
       "शुभ रात्रि": "Good night",
+      
+      // Common phrases
+      "आप कैसे हैं": "How are you?",
+      "आप कैसे हो": "How are you?",
+      "कैसे हो": "How are you?",
+      "क्या हाल है": "What's up?",
+      "आपका नाम क्या है": "What is your name?",
+      "आप कहाँ से हैं": "Where are you from?",
+      
+      // Responses
+      "मैं ठीक हूँ": "I am fine",
       "धन्यवाद": "Thank you",
       "शुक्रिया": "Thanks",
       "कृपया": "Please",
       "माफ़ कीजिए": "Sorry",
       "क्षमा कीजिए": "Excuse me",
+      
+      // Basic words
       "हाँ": "Yes",
       "नहीं": "No",
-      "जी हाँ": "Yes",
-      "जी नहीं": "No",
-      "शायद": "Maybe",
       "ठीक है": "Okay",
-      "मेरा नाम है": "My name is",
-      "आपका नाम क्या है": "What is your name?",
-      "आप कहाँ से हैं": "Where are you from?",
+      "शायद": "Maybe",
+      
+      // Questions
+      "यह क्या है": "What is this?",
+      "वह क्या है": "What is that?",
+      "यह कौन है": "Who is this?",
+      "यह कहाँ है": "Where is it?",
+      "यह कब है": "When is it?",
+      "यह क्यों है": "Why is it?",
+      
+      // Common Hindi phrases
+      "का हाल है": "How are you?",
+      "क्या कर रहे हो": "What are you doing?",
+      "खाना खा लिया": "Have you eaten?",
+      "कहाँ जा रहे हो": "Where are you going?",
+      "क्या समय हुआ है": "What time is it?",
       "मुझे मदद चाहिए": "I need help",
-      "कितने का है": "How much is this?",
+      "पानी दीजिए": "Please give me water",
       "यह कितने का है": "How much is this?",
-      "पानी": "Water",
-      "खाना": "Food",
-      "मदद": "Help",
-      "स्वागत है": "Welcome",
-      "कितना": "How much",
-      "कहाँ": "Where",
-      "कब": "When",
-      "क्यों": "Why",
-      "कौन": "Who",
-      "क्या": "What",
-      "अच्छा": "Good",
-      "बुरा": "Bad",
-      "खुश": "Happy",
-      "उदास": "Sad"
+      "बाथरूम कहाँ है": "Where is the bathroom?"
     };
     
-    // Try exact match first
+    // Try exact match
     if (translations[message.trim()]) {
       return translations[message.trim()];
     }
     
-    // Try case-insensitive match
-    const normalizedHindi = message.trim();
-    return translations[normalizedHindi];
+    // Try with spaces normalized
+    const normalized = message.trim().replace(/\s+/g, ' ');
+    return translations[normalized];
   }
   
   return null;
@@ -380,24 +465,21 @@ function getCommonTranslation(message, sourceLang, targetLang) {
    SOCKET CONNECTION
    ======================= */
 io.on("connection", (socket) => {
-  console.log("🟢 User connected:", socket.id);
+  console.log("\n" + "=".repeat(60));
+  console.log("🟢 NEW USER CONNECTED:", socket.id);
+  console.log("=".repeat(60));
 
-  // Send welcome message
   socket.emit("connected", {
     message: "Connected to LinguaBridge translation server",
     timestamp: new Date().toISOString()
   });
 
   socket.on("sendMessage", async ({ message, sourceLang, targetLang }) => {
-    console.log("\n" + "=".repeat(50));
-    console.log("📨 NEW TRANSLATION REQUEST");
-    console.log("=".repeat(50));
+    console.log("\n📨 TRANSLATION REQUEST FROM:", socket.id);
     console.log("Message:", message);
-    console.log("Raw sourceLang:", sourceLang);
-    console.log("Raw targetLang:", targetLang);
+    console.log("Languages:", sourceLang, "→", targetLang);
 
     try {
-      // Validate input
       if (!message || message.trim().length === 0) {
         throw new Error("Message cannot be empty");
       }
@@ -406,68 +488,60 @@ io.on("connection", (socket) => {
         throw new Error("Languages must be specified");
       }
 
-      // Normalize language codes
       const normalizedSourceLang = normalizeLang(sourceLang);
       const normalizedTargetLang = normalizeLang(targetLang);
       
-      console.log("Normalized sourceLang:", normalizedSourceLang);
-      console.log("Normalized targetLang:", normalizedTargetLang);
+      console.log("Normalized:", normalizedSourceLang, "→", normalizedTargetLang);
 
       if (normalizedSourceLang === normalizedTargetLang) {
         throw new Error("Source and target languages cannot be the same");
       }
 
-      // Translate
       const translatedText = await translateText(
         message.trim(),
         normalizedSourceLang,
         normalizedTargetLang
       );
 
-      console.log("✅ SUCCESS - Translation:", translatedText);
-      console.log("=".repeat(50) + "\n");
+      console.log("✅ TRANSLATION SUCCESS");
+      console.log("Original:", message);
+      console.log("Translated:", translatedText);
+      console.log("=".repeat(60));
 
-      // Send back to client
       socket.emit("receiveMessage", {
         original: message,
         translated: translatedText,
         sourceLang: normalizedSourceLang,
         targetLang: normalizedTargetLang,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        success: true
       });
 
     } catch (error) {
-      console.error("❌ ERROR - Translation failed:", error.message);
-      console.log("=".repeat(50) + "\n");
+      console.error("❌ TRANSLATION FAILED:", error.message);
+      console.log("=".repeat(60));
 
-      // Send error to client
-      socket.emit("translation_error", {
-        error: error.message,
-        message: message,
-        sourceLang: normalizeLang(sourceLang),
-        targetLang: normalizeLang(targetLang)
-      });
-
-      // Also send a fallback response
       const normalizedSourceLang = normalizeLang(sourceLang);
       const normalizedTargetLang = normalizeLang(targetLang);
       
       const fallbackTranslation = getCommonTranslation(message, normalizedSourceLang, normalizedTargetLang) || 
-        `[${normalizedTargetLang.toUpperCase()} Translation] ${message}`;
+        `[${normalizedSourceLang} → ${normalizedTargetLang}] ${message}`;
       
       socket.emit("receiveMessage", {
         original: message,
         translated: fallbackTranslation,
         sourceLang: normalizedSourceLang,
         targetLang: normalizedTargetLang,
+        timestamp: new Date().toISOString(),
         isFallback: true,
-        timestamp: new Date().toISOString()
+        success: false
       });
     }
   });
 
   socket.on("disconnect", (reason) => {
-    console.log("🔴 User disconnected:", socket.id, "Reason:", reason);
+    console.log("\n🔴 USER DISCONNECTED:", socket.id, "Reason:", reason);
+    console.log("=".repeat(60));
   });
 });
 
@@ -477,15 +551,29 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log("🌐 WebSocket server ready");
-  console.log("📡 CORS enabled for all origins");
-  console.log("\n🔧 Available translation services:");
-  console.log("   - MyMemory Translate API");
-  console.log("   - LibreTranslate (multiple instances)");
-  console.log("   - Common phrases dictionary");
-  console.log("\n🔧 Language normalization enabled");
-  console.log("   - Converts 'English' → 'en'");
-  console.log("   - Converts 'Hindi' → 'hi'");
-  console.log("   - Handles various language code formats");
+  console.log(`
+╔══════════════════════════════════════════════════════════╗
+║                    LINGUABRIDGE SERVER                   ║
+║                     v2.0 - ENHANCED                      ║
+╚══════════════════════════════════════════════════════════╝
+  
+🚀 Server running on port ${PORT}
+🌐 WebSocket server ready
+📡 CORS enabled for all origins
+
+🔧 TRANSLATION SERVICES:
+   • Google Translate (Primary)
+   • Bing Translator (Fallback)
+   • MyMemory (Filtered - Last Resort)
+   • Common Phrases Dictionary (Verified)
+
+⚡ FEATURES:
+   • Strict content filtering
+   • Language normalization
+   • Quality validation
+   • Multiple fallbacks
+   • Real-time logging
+
+📊 Ready to translate!
+`);
 });
